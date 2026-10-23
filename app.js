@@ -297,7 +297,7 @@ function predict(item) {
   }
   S.shown = item.rid;
   renderResult({ result: item.predicted, row: r, count: item.predicted === 'already' ? r.qty : countOf(r, item.proc),
-    qty: r.qty, completed: isDoneFor(r, item.proc), pending: true }, item);
+    qty: r.qty, completed: isDoneFor(r, item.proc), skipped: item.skips, pending: true }, item);
   markListDirty();
 }
 
@@ -308,6 +308,20 @@ function predictApply(item) {
   const next = item.opts.all ? r.qty : Math.min(r.qty, countOf(r, item.proc) + 1);
   r.count = Object.assign({}, r.count, { [item.proc]: next });
   if (next >= r.qty && hasCol(item.proc)) r.done = Object.assign({}, r.done, { [item.proc]: true });
+
+  // 飛ばされた前の工程はスキップ扱い（未着手の工程だけ。最終的な判定はサーバーが行う）
+  const idx = S.processes.findIndex(p => p.code === item.proc);
+  item.skips = S.processes.slice(0, idx)
+    .filter(p => p.code !== 'STOCK' && !isDoneFor(r, p.code) && countOf(r, p.code) === 0)
+    .map(p => p.code);
+  item.skips.forEach(code => {
+    r.count = Object.assign({}, r.count, { [code]: r.qty });
+    if (hasCol(code)) r.done = Object.assign({}, r.done, { [code]: true });
+  });
+}
+
+function skipText(codes) {
+  return codes && codes.length ? 'スキップ：' + codes.map(procName).join('・') : '';
 }
 
 async function pump() {
@@ -338,11 +352,15 @@ async function pump() {
 /** サーバーの結果で確定させる。予測と違ったときだけ音と表示で知らせる */
 function reconcile(item, j) {
   if (j.row) mergeRow(j.row, item.proc, j.count);
+  const r = S.byPno.get(item.pno);
+  if (r && j.counts) r.count = j.counts;
   const changed = j.result !== item.predicted;
   if (j.result === 'ok') {
     if (S.proc === item.proc) S.last = { id: j.id, pno: item.pno, proc: item.proc, qty: j.qty };
     if (changed) sound(j.completed ? 'complete' : 'ok');
-    setRecent(item.entry, 'ok', j.qty > 1 ? j.count + '/' + j.qty + (j.completed ? ' 完了' : '') : '完了');
+    const skip = skipText(j.skipped);
+    setRecent(item.entry, j.skipped && j.skipped.length ? 'warn' : 'ok',
+      (j.qty > 1 ? j.count + '/' + j.qty + (j.completed ? ' 完了' : '') : '完了') + (skip ? '（' + skip + '）' : ''));
   } else if (j.result === 'already') {
     if (changed) sound('warn');
     setRecent(item.entry, 'warn', '完了済み（警告）');
@@ -413,14 +431,17 @@ function renderResult(j, item) {
 
   const showAll = j.result === 'ok' && !j.completed && j.qty > 1;
   const canUndo = !j.pending && j.result === 'ok' && S.last && S.last.id === j.id;
+  const skipped = j.result === 'ok' ? (j.skipped || []) : [];
   el.innerHTML =
     '<div class="rhead">' + head + (j.round > 1 ? '（' + j.round + '回目）' : '') + '</div>' +
     '<div class="pno">' + esc(r.pno) + '</div>' +
     '<div>' + esc(r.code) + '　' + esc(r.name) + '</div>' +
     '<div class="muted">注番 ' + esc(r.cno) + '／色 ' + esc(r.color) + '／出荷 ' + esc(r.due) + '</div>' +
     '<div class="count">' + (j.qty > 1 ? j.qty + '個中 ' + j.count + '個' : '数量 1') + '</div>' +
+    (skipped.length ? '<div class="skipnote">' + esc(skipText(skipped)) + '（飛ばした工程を済にしました）</div>' : '') +
     '<div class="steps">' + S.processes.map(p =>
-      '<span class="' + (r.done[p.code] ? 'done ' : '') + (p.code === item.proc ? 'cur' : '') + '">' + esc(p.name) + '</span>'
+      '<span class="' + (skipped.indexOf(p.code) >= 0 ? 'skip ' : r.done[p.code] ? 'done ' : '') +
+        (p.code === item.proc ? 'cur' : '') + '">' + esc(p.name) + '</span>'
     ).join('') + '</div>' +
     '<div class="sendstate">' + (j.pending ? '送信中…' : '記録しました') + '</div>' +
     '<div class="actions">' +
@@ -471,13 +492,44 @@ $('rcBack').addEventListener('click', e => { const b = e.target.closest('button'
 $('rcReason').addEventListener('click', e => { const b = e.target.closest('button'); if (b) { RC.reason = b.dataset.v; renderRecoat(); } });
 $('rcMinus').onclick = () => { if (RC.qty > 1) { RC.qty--; renderRecoat(); } };
 $('rcPlus').onclick = () => { if (RC.qty < RC.row.qty) { RC.qty++; renderRecoat(); } };
-$('rcCancel').onclick = () => $('recoat').classList.add('hidden');
+$('rcCancel').onclick = () => { $('recoat').classList.add('hidden'); setRecoatMode(false); };
 $('rcGo').onclick = doRecoat;
+
+// リコートモード：次に読んだ（入力した）製品は、完了として数えずにリコート画面を開く。1件で自動的に戻る
+function setRecoatMode(on) {
+  S.recoatMode = on;
+  $('btnMode').classList.toggle('on', on);
+  $('btnMode').textContent = on ? 'リコートモードをやめる' : 'リコートモードにする';
+  $('modeBar').classList.toggle('hidden', !on);
+}
+$('btnMode').onclick = () => { sound(); setRecoatMode(!S.recoatMode); };
+
+function recoatByPno(pno) {
+  const r = S.byPno.get(pno);
+  if (!r) {
+    sound('ng');
+    toast(pno + ' は一覧にありません（出荷済みか未登録）');
+    return;
+  }
+  sound('ok');
+  openRecoat(r, S.proc);
+}
+
+/** スキャン・手入力の受け口。リコートモードならリコート画面、そうでなければ完了として送る */
+function handleCode(pno) {
+  pno = String(pno || '').trim();
+  if (!pno) return;
+  if (S.recoatMode) recoatByPno(pno);
+  else enqueue(pno);
+}
+
+function modalOpen() { return !!document.querySelector('.modal:not(.hidden)'); }
 
 async function doRecoat() {
   if (S.busy) return;
   const req = { process: RC.proc, pno: RC.row.pno, back: RC.back, reason: RC.reason, qty: RC.qty, rid: uid() };
   $('recoat').classList.add('hidden');
+  setRecoatMode(false);
   loading(true, 'リコート中…');
   try {
     // 先に送ったスキャンの記録が済んでから戻す
@@ -489,6 +541,7 @@ async function doRecoat() {
     sound('warn');
     const text = 'リコート→' + procName(req.back) + '（' + req.reason + (j.qty > 1 ? '・' + j.n + '個' : '') + '）';
     addRecent('warn', req.pno, req.process, text);
+    if (listVisible()) toast(req.pno + '：' + text);
     S.shown = '';
     $('result').className = 'card warn';
     $('result').innerHTML = '<div class="rhead">リコートしました</div><div class="pno">' + esc(req.pno) + '</div>' +
@@ -548,11 +601,11 @@ function renderRecent() {
   ).join('') || '<li class="muted">まだありません</li>';
 }
 
-$('btnEnter').onclick = () => { enqueue($('pnoInput').value); $('pnoInput').value = ''; };
+$('btnEnter').onclick = () => { handleCode($('pnoInput').value); $('pnoInput').value = ''; };
 $('pnoInput').addEventListener('keydown', e => {
   if (e.key !== 'Enter') return;
   e.preventDefault();
-  enqueue(e.target.value);
+  handleCode(e.target.value);
   e.target.value = '';
 });
 
@@ -578,11 +631,11 @@ async function startCamera() {
   }
 }
 function onDecode(text) {
-  if (listVisible()) return;
+  if (listVisible() || modalOpen()) return;
   const now = Date.now();
   if (text === lastCode && now - lastAt < SAME_CODE_MS) return;
   lastCode = text; lastAt = now;
-  enqueue(text);
+  handleCode(text);
 }
 async function stopCamera() {
   if (!cam) return;
@@ -660,7 +713,7 @@ function renderList() {
   if (q) rows = rows.filter(r => [r.code, r.cno, r.name, r.pno].some(x => String(x).toLowerCase().includes(q)));
 
   shownRows = rows.slice(0, MAX_ROWS);
-  $('listCount').textContent = procName(S.proc) + '：' + rows.length + '件（行をタップすると完了にできます）';
+  $('listCount').textContent = procName(S.proc) + '：' + rows.length + '件（行をタップすると完了・リコートができます）';
   $('listBody').innerHTML = shownRows.map((r, i) =>
     '<tr data-i="' + i + '">' +
     '<td>' + esc(r.pno) + '</td>' +
@@ -676,15 +729,32 @@ function renderList() {
 }
 
 // ラベルが剥がれたときなどの手動入力
+// 行をタップすると「完了にする／リコート」を選べる。完了済みの行はリコートだけ
+let menuRow = null;
 $('listBody').addEventListener('click', e => {
   const tr = e.target.closest('tr[data-i]');
   if (!tr) return;
   const r = shownRows[Number(tr.dataset.i)];
-  if (!r || isDoneFor(r, S.proc)) return;
+  if (!r) return;
+  menuRow = r;
+  const done = isDoneFor(r, S.proc);
   const rest = r.qty - countOf(r, S.proc);
-  if (!confirm(r.pno + '（' + r.name + '）\n' + procName(S.proc) + 'を完了にしますか？' + (r.qty > 1 ? '（残り' + rest + '個すべて）' : ''))) return;
-  enqueue(r.pno, { all: true, source: 'list' });
+  $('rmPno').textContent = r.pno;
+  $('rmName').textContent = r.code + '　' + r.name;
+  $('rmState').textContent = procName(S.proc) + '：' + (done ? '完了済み' : r.qty > 1 ? r.qty + '個中 ' + countOf(r, S.proc) + '個' : '未完了');
+  $('rmDone').classList.toggle('hidden', done);
+  $('rmDone').textContent = '完了にする' + (r.qty > 1 ? '（残り' + rest + '個すべて）' : '');
+  $('rowMenu').classList.remove('hidden');
 });
+$('rmDone').onclick = () => {
+  $('rowMenu').classList.add('hidden');
+  enqueue(menuRow.pno, { all: true, source: 'list' });
+};
+$('rmRecoat').onclick = () => {
+  $('rowMenu').classList.add('hidden');
+  openRecoat(menuRow, S.proc);
+};
+$('rmCancel').onclick = () => $('rowMenu').classList.add('hidden');
 
 // ---------- 起動 ----------
 // ログインが残っていれば、端末に残した一覧ですぐ表示し、裏で最新を取り直す
