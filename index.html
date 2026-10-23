@@ -75,6 +75,16 @@
   #recent li.sending { color: #6b7280; }
   .pending { background: #1d4ed8; color: #fff; border-radius: 999px; padding: 4px 12px; font-size: 15px; font-weight: bold; }
   .sendstate { font-size: 14px; color: #6b7280; margin-top: 6px; }
+  .btn.red { background: #dc2626; }
+
+  .modal { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 90; display: flex; align-items: flex-start; justify-content: center; overflow-y: auto; padding: 16px; }
+  .modal .sheet { background: #fff; border-radius: 12px; padding: 16px; width: 100%; max-width: 640px; }
+  .modal .label { font-weight: bold; margin: 14px 0 6px; }
+  .choice { display: flex; flex-wrap: wrap; gap: 8px; }
+  .choice button { flex: 1 1 120px; min-height: 60px; font-size: 20px; font-weight: bold; border: 3px solid #d1d5db; border-radius: 10px; background: #fff; }
+  .choice button.on { border-color: #dc2626; background: #fef2f2; color: #b91c1c; }
+  .stepper { min-width: 72px; font-size: 28px; }
+  .qtyval { font-size: 32px; font-weight: bold; min-width: 60px; text-align: center; }
 
   .seg { display: flex; gap: 6px; flex-wrap: wrap; }
   .seg button { min-height: 48px; padding: 0 14px; font-size: 16px; border: 2px solid #2563eb; background: #fff; color: #2563eb; border-radius: 8px; }
@@ -190,6 +200,33 @@
     </section>
   </main>
 </section>
+
+<!-- リコート -->
+<div id="recoat" class="modal hidden">
+  <div class="sheet">
+    <div class="rhead">リコート（前の工程へ戻す）</div>
+    <div class="pno" id="rcPno"></div>
+    <div class="muted" id="rcName"></div>
+    <div class="label">戻し先</div>
+    <div class="choice" id="rcBack"></div>
+    <div class="label">理由</div>
+    <div class="choice" id="rcReason"></div>
+    <div id="rcQtyArea">
+      <div class="label">戻す個数</div>
+      <div class="row">
+        <button class="btn gray stepper" id="rcMinus">−</button>
+        <span class="qtyval" id="rcQty">1</span>
+        <button class="btn gray stepper" id="rcPlus">＋</button>
+        <span class="muted" id="rcQtyMax"></span>
+      </div>
+    </div>
+    <div class="muted" id="rcNote" style="margin-top:10px"></div>
+    <div class="actions">
+      <button class="btn gray" id="rcCancel">やめる</button>
+      <button class="btn red" id="rcGo" disabled>リコートする</button>
+    </div>
+  </div>
+</div>
 
 <div id="loading" class="hidden">読み込み中…</div>
 <div id="toast" class="hidden"></div>

@@ -106,13 +106,16 @@ function unpack(a) {
 }
 
 function applyInit(j) {
-  S.processes = j.processes; S.today = j.today;
+  S.processes = j.processes; S.today = j.today; S.reasons = j.reasons || [];
   if (j.user) S.user = j.user;
   S.rows = j.rows.map(unpack);
   S.byPno = new Map(S.rows.map(r => [r.pno, r]));
   // 再ログインをすぐ表示できるよう、一覧（製品データのみ）を端末に残す
-  lsSet('koutei_rows', { at: Date.now(), today: j.today, processes: j.processes, rows: j.rows });
+  lsSet('koutei_rows', { at: Date.now(), today: j.today, processes: j.processes, reasons: S.reasons, rows: j.rows });
 }
+
+/** ログイン中の人が担当できる工程（暗証番号シートC列）。判定はサーバーでも行う */
+function allowedProcs() { return S.processes.filter(p => p.allowed !== false); }
 
 function countOf(r, proc) { return (r.count || {})[proc] || 0; }
 function hasCol(proc) { const p = S.processes.find(x => x.code === proc); return p ? p.hasCol : true; }
@@ -193,8 +196,10 @@ setInterval(() => {
 
 // ---------- 本体 ----------
 function showApp() {
-  if (FIXED && S.processes.some(p => p.code === FIXED)) S.proc = FIXED;
-  if (!S.processes.some(p => p.code === S.proc)) S.proc = S.processes[0].code;
+  const allowed = allowedProcs();
+  if (FIXED && allowed.some(p => p.code === FIXED)) S.proc = FIXED;
+  else if (FIXED) toast('「' + procName(FIXED) + '」の権限がないため、担当工程に切り替えました');
+  if (!allowed.some(p => p.code === S.proc)) S.proc = allowed[0].code;
   touch();
   buildDates();
   $('whoName').textContent = S.user.name + '（' + S.user.emp + '）';
@@ -225,11 +230,12 @@ async function refresh(manual) {
 function procName(code) { const p = S.processes.find(x => x.code === code); return p ? p.name : code; }
 
 function renderProcs() {
-  if (FIXED && S.proc === FIXED) {
-    $('procArea').innerHTML = '<div class="fixed">工程：' + esc(procName(FIXED)) + '</div>';
+  const allowed = allowedProcs();
+  if ((FIXED && S.proc === FIXED) || allowed.length === 1) {
+    $('procArea').innerHTML = '<div class="fixed">工程：' + esc(procName(S.proc)) + '</div>';
     return;
   }
-  $('procArea').innerHTML = '<div class="procs">' + S.processes.map(p =>
+  $('procArea').innerHTML = '<div class="procs">' + allowed.map(p =>
     '<button data-proc="' + p.code + '" class="' + (p.code === S.proc ? 'on' : '') + '">' + esc(p.name) + '</button>'
   ).join('') + '</div>';
 }
@@ -420,11 +426,83 @@ function renderResult(j, item) {
     '<div class="actions">' +
       (showAll ? '<button class="btn green" id="btnAll">全数完了（残り' + (j.qty - j.count) + '個）</button>' : '') +
       (canUndo ? '<button class="btn orange" id="btnUndo">取り消し</button>' : '') +
+      '<button class="btn red" id="btnRecoat">リコート</button>' +
     '</div>';
   if (showAll) $('btnAll').onclick = () => {
     if (confirm(r.pno + ' の残り' + (j.qty - j.count) + '個を完了にしますか？')) enqueue(r.pno, { all: true });
   };
   if (canUndo) $('btnUndo').onclick = undoLast;
+  $('btnRecoat').onclick = () => openRecoat(r, item.proc);
+}
+
+// ---------- リコート ----------
+const RC = { row: null, proc: '', back: '', reason: '', qty: 1 };
+
+function openRecoat(r, proc) {
+  Object.assign(RC, { row: r, proc: proc, back: '', reason: '', qty: 1 });
+  const idx = S.processes.findIndex(p => p.code === proc);
+  // 戻し先は今の工程まで（完了は選べない）
+  const backs = S.processes.slice(0, idx + 1).filter(p => p.code !== 'STOCK');
+  $('rcPno').textContent = r.pno;
+  $('rcName').textContent = r.code + '　' + r.name + '（' + procName(proc) + 'でリコート）';
+  $('rcBack').innerHTML = backs.map(p => '<button data-v="' + p.code + '">' + esc(p.name) + '</button>').join('');
+  $('rcReason').innerHTML = (S.reasons || []).map(v => '<button data-v="' + esc(v) + '">' + esc(v) + '</button>').join('');
+  $('rcQtyArea').classList.toggle('hidden', r.qty <= 1);
+  $('rcQtyMax').textContent = '（' + r.qty + '個中）';
+  renderRecoat();
+  $('recoat').classList.remove('hidden');
+}
+
+function renderRecoat() {
+  document.querySelectorAll('#rcBack button').forEach(b => b.classList.toggle('on', b.dataset.v === RC.back));
+  document.querySelectorAll('#rcReason button').forEach(b => b.classList.toggle('on', b.dataset.v === RC.reason));
+  $('rcQty').textContent = RC.qty;
+  if (RC.back) {
+    const i = S.processes.findIndex(p => p.code === RC.back);
+    const names = S.processes.slice(i).filter(p => p.code !== 'STOCK').map(p => p.name).join('・');
+    $('rcNote').textContent = names + ' を、戻した' + RC.qty + '個分やり直しにします（チェックを外します）。';
+  } else {
+    $('rcNote').textContent = '';
+  }
+  $('rcGo').disabled = !RC.back || !RC.reason;
+}
+
+$('rcBack').addEventListener('click', e => { const b = e.target.closest('button'); if (b) { RC.back = b.dataset.v; renderRecoat(); } });
+$('rcReason').addEventListener('click', e => { const b = e.target.closest('button'); if (b) { RC.reason = b.dataset.v; renderRecoat(); } });
+$('rcMinus').onclick = () => { if (RC.qty > 1) { RC.qty--; renderRecoat(); } };
+$('rcPlus').onclick = () => { if (RC.qty < RC.row.qty) { RC.qty++; renderRecoat(); } };
+$('rcCancel').onclick = () => $('recoat').classList.add('hidden');
+$('rcGo').onclick = doRecoat;
+
+async function doRecoat() {
+  if (S.busy) return;
+  const req = { process: RC.proc, pno: RC.row.pno, back: RC.back, reason: RC.reason, qty: RC.qty, rid: uid() };
+  $('recoat').classList.add('hidden');
+  loading(true, 'リコート中…');
+  try {
+    // 先に送ったスキャンの記録が済んでから戻す
+    for (let t = 0; S.queue.length && t < 300; t++) await sleep(200);
+    const j = await api('recoat', req);
+    const r = S.byPno.get(req.pno);
+    if (r) { r.done = j.row.done; r.count = j.counts || {}; }
+    S.last = { id: j.id, pno: req.pno, proc: req.process, kind: 'recoat' };
+    sound('warn');
+    const text = 'リコート→' + procName(req.back) + '（' + req.reason + (j.qty > 1 ? '・' + j.n + '個' : '') + '）';
+    addRecent('warn', req.pno, req.process, text);
+    S.shown = '';
+    $('result').className = 'card warn';
+    $('result').innerHTML = '<div class="rhead">リコートしました</div><div class="pno">' + esc(req.pno) + '</div>' +
+      '<div>' + esc(text) + '</div>' +
+      '<div class="steps">' + S.processes.map(p => '<span class="' + (j.row.done[p.code] ? 'done' : '') + '">' + esc(p.name) + '</span>').join('') + '</div>' +
+      '<div class="actions"><button class="btn orange" id="btnUndo">取り消し</button></div>';
+    $('btnUndo').onclick = undoLast;
+    markListDirty();
+  } catch (e) {
+    toast(e.message);
+    sound('ng');
+  } finally {
+    loading(false);
+  }
 }
 
 async function undoLast() {
@@ -433,14 +511,16 @@ async function undoLast() {
   const last = S.last;
   loading(true, '取り消し中…');
   try {
-    const j = await api('undo', { id: last.id });
+    const j = await api('undo', { id: last.id, rid: uid() });
     S.last = null;
-    if (j.row) mergeRow(j.row, j.process, j.count);
+    const r = S.byPno.get(last.pno);
+    if (r && j.row) { r.done = j.row.done; r.count = j.counts || {}; }
     sound('ok');
-    addRecent('warn', last.pno, last.proc, '取り消し');
+    const what = last.kind === 'recoat' ? 'リコートを取り消し' : '取り消し';
+    addRecent('warn', last.pno, last.proc, what);
     $('result').className = 'card warn';
-    $('result').innerHTML = '<div class="rhead">取り消しました</div><div class="pno">' + esc(last.pno) + '</div>' +
-      '<div>' + esc(procName(j.process)) + (j.qty > 1 ? '：' + j.qty + '個中 ' + j.count + '個' : '') + '</div>';
+    $('result').innerHTML = '<div class="rhead">' + what + 'ました</div><div class="pno">' + esc(last.pno) + '</div>' +
+      (last.kind === 'recoat' ? '' : '<div>' + esc(procName(j.process)) + (j.qty > 1 ? '：' + j.qty + '個中 ' + j.count + '個' : '') + '</div>');
     markListDirty();
   } catch (e) {
     toast(e.message);
@@ -613,7 +693,7 @@ $('listBody').addEventListener('click', e => {
   const cached = lsGet('koutei_rows');
   if (s && s.token && Date.now() - s.at < IDLE_MS && cached && cached.rows) {
     S.token = s.token; S.user = s.user; S.proc = s.proc || '';
-    S.processes = cached.processes; S.today = cached.today;
+    S.processes = cached.processes; S.today = cached.today; S.reasons = cached.reasons || [];
     S.rows = cached.rows.map(unpack);
     S.byPno = new Map(S.rows.map(r => [r.pno, r]));
     showApp();
